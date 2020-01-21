@@ -645,6 +645,8 @@ recolor(ZathuraRendererPrivate* priv, zathura_page_t* page, unsigned int page_wi
         );
         /* If it's inside and image don't recolor */
         if (inside_image == true) {
+          /* It is not guaranteed that the pixel is already opaque. */
+          data[3] = 255;
           continue;
         }
       }
@@ -658,6 +660,10 @@ recolor(ZathuraRendererPrivate* priv, zathura_page_t* page, unsigned int page_wi
 
       /* compute h, s, l data   */
       double l = a[0]*rgb[0] + a[1]*rgb[1] + a[2]*rgb[2];
+
+      /* Compute the transparency contributed by darkcolor and lightcolor. */
+      const double tr1 = (1. - fmax(fmax(rgb[0], rgb[1]), rgb[2])) * (1. - rgb1.alpha);
+      const double tr2 = fmin(fmin(rgb[0], rgb[1]), rgb[2]) * (1. - rgb2.alpha);
 
       if (priv->recolor.hue == true) {
         /* adjusting lightness keeping hue of current color. white and black
@@ -678,16 +684,22 @@ recolor(ZathuraRendererPrivate* priv, zathura_page_t* page, unsigned int page_wi
         l = l * (l2 - l1) + l1;
 
         const double su = s * colorumax(h, l, l1, l2);
-        data[2] = (unsigned char)round(255.*(l + su * h[0]));
-        data[1] = (unsigned char)round(255.*(l + su * h[1]));
-        data[0] = (unsigned char)round(255.*(l + su * h[2]));
+
+        /* Darken each channel to compensate for transparency. */
+        const double del = tr1 * l1 + tr2 * l2;
+
+        data[2] = (unsigned char)round(255.*fmax(0, l + su * h[0] - del));
+        data[1] = (unsigned char)round(255.*fmax(0, l + su * h[1] - del));
+        data[0] = (unsigned char)round(255.*fmax(0, l + su * h[2] - del));
       } else {
         /* linear interpolation between dark and light with color ligtness as
          * a parameter */
-        data[2] = (unsigned char)round(255.*(l * rgb_diff[0] + rgb1.red));
-        data[1] = (unsigned char)round(255.*(l * rgb_diff[1] + rgb1.green));
-        data[0] = (unsigned char)round(255.*(l * rgb_diff[2] + rgb1.blue));
+        const double tr1neg = 1. - tr1;
+        data[2] = (unsigned char)round(255.*(l * rgb_diff[0] - rgb2.red*tr2 + tr1neg*rgb1.red));
+        data[1] = (unsigned char)round(255.*(l * rgb_diff[1] - rgb2.green*tr2 + tr1neg*rgb1.green));
+        data[0] = (unsigned char)round(255.*(l * rgb_diff[2] - rgb2.blue*tr2 + tr1neg*rgb1.blue));
       }
+      data[3] = (unsigned char)round(255.*(1. - tr1 - tr2));
     }
   }
 
@@ -778,8 +790,16 @@ render(render_job_t* job, ZathuraRenderRequest* request, ZathuraRenderer* render
     page_height = height;
   }
 
-  cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24,
+  cairo_format_t format;
+  if (priv->recolor.enabled) {
+    format = CAIRO_FORMAT_ARGB32;
+  }
+  else {
+    format = CAIRO_FORMAT_RGB24;
+  }
+  cairo_surface_t* surface = cairo_image_surface_create(format,
       page_width, page_height);
+
   if (surface == NULL) {
     return false;
   }
